@@ -7,53 +7,61 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/DanilaNova/go-6-sprint-final/internal/service"
-	"github.com/DanilaNova/go-6-sprint-final/pkg/morse"
 )
 
 const (
 	// 10 MB
-	MULTIPART_PARSE_MAX_MEMORY = 10 * 1024 * 1024
-	STATUS_CONTENT_TOO_LARGE   = 413
+	MultipartParseMaxMemory = 10 * 1024 * 1024
+	StatusContentTooLarge   = 413
+)
+
+var (
+	errCannotCreateDumpFolder = errors.New("cannot create result dump folder")
+
+	errCannotCreateDumpFile = errors.New("cannot create result dump file")
+	errStat                 = errors.New("error in os.Stat")
 )
 
 // "GET /" pattern handler generator
+//
+// # Request
+//
+// irrelevant
+//
+// # Response
+//
+// Content-Type: text/html
 func Root(logger *log.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
-		data, err := os.ReadFile("index.html")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			logger.Println("Root request error: index reading error: ", err)
-			return
-		}
-
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusOK)
-		w.Write(data)
+		http.ServeFile(w, req, "index.html")
 	}
 }
 
 // "POST /upload" pattern handler generator
+//
+// # Request
+//
+// Content-Type: multipart/form-data
+//
+// # Response
+//
+// Content-Type: text/plain;charset=utf-8
 func Upload(logger *log.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
-		if req.ContentLength > MULTIPART_PARSE_MAX_MEMORY {
-			http.Error(w, fmt.Sprintf("Content Too Large (max %d)", MULTIPART_PARSE_MAX_MEMORY), STATUS_CONTENT_TOO_LARGE)
+		if req.ContentLength > MultipartParseMaxMemory {
+			http.Error(w, fmt.Sprintf("Content Too Large (max %d)", MultipartParseMaxMemory), http.StatusInternalServerError)
 			logger.Println("Upload error: content too large: ", req.ContentLength)
 			return
 		}
 
 		err := req.ParseMultipartForm(req.ContentLength)
 
-		if errors.Is(err, http.ErrNotMultipart) {
-			w.Header().Set("Accept", "multipart/form-data")
-			http.Error(w, err.Error(), http.StatusUnsupportedMediaType)
-			logger.Println("Upload error: unsupported media type: ", req.Header.Get("Content-Type"))
-			return
-		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
-			logger.Println("Upload error: unknown parsing error: ", err)
+			logger.Println("Upload error: multipart form parsing error: ", err)
 			return
 		}
 
@@ -71,38 +79,60 @@ func Upload(logger *log.Logger) http.HandlerFunc {
 			return
 		}
 
-		data, err := io.ReadAll(file)
-		file.Close()
-		if err != nil {
+		data, readErr := io.ReadAll(file)
+		closeErr := file.Close()
+		if err = errors.Join(readErr, closeErr); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
-			logger.Println("Upload error: file reading error: ", err)
+			logger.Println("Upload error: file header reading error: ", err)
 			return
 		}
 
-		isMorse := service.IsMorse(data)
-		var isMorseStr string
-		if isMorse {
-			isMorseStr = "morse"
-		} else {
-			isMorseStr = "text"
-		}
+		converted := service.Convert(string(data))
 
-		var converted string
-		if isMorse {
-			converted = morse.ToText(string(data))
-		} else {
-			converted = morse.ToMorse(string(data))
-		}
-		logger.Printf("Got %s data: %q.\nConverted to: %q.", isMorseStr, string(data), converted)
+		logger.Printf("Got data: %q.\nConverted to: %q.", string(data), converted)
 		data = []byte(converted)
 
-		err = service.CreateDump(data)
+		err = createDump(data)
 		if err != nil {
 			logger.Printf("Error in creating dump: %v", err)
 		}
 
 		w.Header().Set("Content-Type", "text/plain;charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		w.Write(data)
+
+		_, err = w.Write(data)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}
+}
+
+// Creates dump file with current time as a name and writes data into it
+//
+// # Errors:
+//
+// [errCannotCreateDumpFolder] |
+// [errCannotCreateDumpFile] |
+// [errStat]
+func createDump(data []byte) error {
+	_, err := os.Stat("dumps")
+	if err != nil {
+		if os.IsNotExist(err) {
+			err = os.Mkdir("dumps", 0755)
+			if err != nil {
+				return fmt.Errorf("%w: %w", errCannotCreateDumpFolder, err)
+			}
+		} else {
+			return fmt.Errorf("%w: %w", errStat, err)
+		}
+	}
+
+	file, err := os.Create("dumps/" + time.Now().UTC().String() + ".txt")
+	if err != nil {
+		return fmt.Errorf("%w: %w", errCannotCreateDumpFile, err)
+	}
+
+	_, writeErr := file.Write(data)
+	closeErr := file.Close()
+	return errors.Join(writeErr, closeErr)
 }
