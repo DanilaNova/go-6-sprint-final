@@ -102,7 +102,7 @@ func Upload(logger *log.Logger) http.HandlerFunc {
 
 		_, err = w.Write(data)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			logger.Printf("Error in writing response data: %v", err)
 		}
 	}
 }
